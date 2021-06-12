@@ -1,0 +1,193 @@
+---
+title: "kursach_prakt_chast"
+output: pdf_document
+---
+
+
+```{r}
+setwd('C:/Users/eapst/Desktop/КУРСАЧ/data')
+library(rugarch)
+#library(rmgarch)
+library(quantmod)
+library(FinTS)
+library(zoo)
+library(e1071)
+library(stats)
+library(tseries)
+library(forecast)
+library(fBasics)
+library(qqplotr)
+library(ggplot2)
+library(xts)
+```
+
+Для начала получим очищенные данные за 2013-2021 годы.
+Здесь будут цены и доходность одной акции. В дальнейшем мы протестируем модель на всех остальных акциях.
+Возьмем цены акции компании Система, тикер AFKS.
+Упорядочим данные по годам.
+
+```{r}
+afks = read.csv("AFKS_den_2013_2021_clean.csv")
+afks$Date = as.Date(afks$Date)
+afks = afks[order(afks$Date), ]
+
+```
+
+```{r}
+ts_afks = ts(afks$Log_return, frequency = 365, start=c(2013,1))
+```
+
+Теперь построим график лог-доходностей акции.
+
+```{r}
+plot(afks$Log_return~afks$Date, type="l",xlab="Date", ylab="Log Returns")
+```
+
+```{r}
+plot(ts_afks)
+```
+
+Из графика видно, что может сущетсвовать автокорреляция с предыдущими периодами.
+Проверим доходности на нормальность.
+```{r}
+qqnorm(afks$Log_return)
+qqline(afks$Log_return, col = 2) 
+```
+Из графика понятно, что распределение похоже на нормальное, но у него толстые хвосты.
+
+Посмотрим на основные статистики
+```{r}
+basicStats(afks$Log_return)
+```
+
+Также можно увидеть что присутствует перекос вправо(положительный). Отсюда можно сделать вывод, что в модели гарча лучше применять sstd. 
+
+
+Проверим предположение при помощи PACF графиков и формальных тестов.
+
+```{r}
+pacf((afks$Log_return))
+```
+
+```{r}
+pacf(ts_afks)
+```
+
+
+Из графика можно увидеть значительные лаги. Из этого следует, что к данным можно применять GARCH модель.
+Но для начала проверим данные на станционарность. Для этого мы применим расширенный тест Дики-Фуллера (ADF).
+
+```{r}
+adf.test(afks$Log_return)
+
+```
+
+```{r}
+adf.test(ts_afks)
+```
+
+
+Из заключения ADF теста следует, что данные стационарны.
+h0: data is unit root(non-stationary).
+h0 is rejected. 
+ha: data is stationary.
+
+Теперь можно провести GARCH моделирование.
+
+Подбираем лучшую модель ARIMA при помощи auto.arima
+```{r}
+auto_arima_model = auto.arima(afks$Log_return)
+accuracy(auto_arima_model)
+```
+
+Лучшая модель с наименьшим критерием Акаики ARIMA(2,0,2).
+Но у нее хромает точность, проверить ее.
+
+```{r}
+checkresiduals(auto_arima_model)
+
+```
+
+P-value теста Ljung-Box  показывает, что модель подходит и в остатках почти не наблюдается корреляции. Однако, также можно увидеть из графика, что остатки плохо описывают нормальное распределение.
+
+Проверим автокорреляцию квадратов остатков после применения модели ARIMA(2,0,2) а также нормальность остатков.
+
+
+```{r}
+residuals = residuals(auto_arima_model)
+acf(residuals^2)
+```
+
+Как можно увидеть на графике, после применения модели ARIMA(2,0,2) здесь все ёщё наблюдается автокорреляция, которая может быть объяснена GARCH моделью.
+
+```{r}
+qqnorm(residuals)
+qqline(residuals, col = 2) 
+```
+Остатки близки к нормальным, но с толстыми хвостами.
+
+```{r}
+egarch1_1_arma_2_2_sstd = ugarchspec(mean.model = list(armaOrder=c(2,2)),
+                      variance.model = list(model="eGARCH",
+                                            garchOrder=c(1,1)),
+                      distribution.model = "sstd",)
+fit_egarch1_1_arma_2_2_sstd = ugarchfit(spec = egarch1_1_arma_2_2_sstd, data = ts_afks, solver = 'hybrid')
+```
+
+Посмотрим на параметры
+```{r}
+fit_egarch1_1_arma_2_2_sstd@model
+```
+
+
+```{r}
+fit_egarch1_1_arma_2_2_sstd
+```
+Описание модели:
+
+
+Графики
+```{r}
+plot(fit_egarch1_1_arma_2_2_sstd, which = "all")
+```
+
+
+```{r}
+resid_garch1_1 = residuals(fit_egarch1_1_arma_2_2_sstd, standardize = TRUE)
+acf(abs(resid_garch1_1))
+```
+
+Теперь построим прогноз (rolling forecast)
+
+Для прогноза нужно установить правильно дату:
+```{r}
+dates <- afks$Date
+xts_afks <- xts(x=afks$Log_return, order.by=dates)
+```
+
+
+```{r}
+rf = ugarchroll(egarch1_1_arma_2_2_sstd, data = xts_afks, n.ahead = 1,
+                        n.start = 1000, refit.every = 200, refit.window = "recursive")
+rf
+```
+Теперь делаем репорт на построенные прогнозы:
+```{r}
+report(rf, type="VaR", VaR.alpha = 0.01, conf.level = 0.95)
+```
+
+Рисуем прогнозы
+```{r}
+plot(rf, which="all")
+```
+```{r}
+forc = ugarchforecast(fit_egarch1_1_arma_2_2_sstd, data = xts_afks, n.ahead = 100, out.sample = 1000, n.roll=10)
+plot(forc, which = "all")
+```
+
+#```{r}
+#garchroll <- ugarchroll(egarch1_1_arma_2_2_sstd, data = afks$Log_return, n.start = 1000,
+#                        refit.window = "moving", refit.every = 100)
+#garchroll
+#```
+
